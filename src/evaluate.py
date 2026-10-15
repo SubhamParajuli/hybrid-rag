@@ -1,13 +1,18 @@
 import os
 import time
+from typing import List
 from langsmith import Client
 from langsmith.evaluation import evaluate
 from langchain_core.documents import Document
 from langchain_community.retrievers import BM25Retriever
-
+from src.examples import examples
 from src.chain import RAGChain
 from src.vectorstore import VectorStoreManager
 from src.config import LANGCHAIN_PROJECT, LANGCHAIN_API_KEY
+
+import json
+
+
 
 
 class LangSmithRAGEvaluator:
@@ -18,47 +23,49 @@ class LangSmithRAGEvaluator:
         self.client = Client()
         self.rag = RAGChain()
         self.vector_manager = VectorStoreManager()
-        self.dataset_name = "transformer-rag-ablation-benchmark"
+        self.eval_dataset=examples
+        self.dataset_name = "transformer-hybrid-rag-eval"
+        
 
     def setup_dataset(self):
-        """Creates or fetches the evaluation dataset in LangSmith."""
-        if self.client.has_dataset(dataset_name=self.dataset_name):
-            print(f"Dataset '{self.dataset_name}' already exists in LangSmith.")
-            return self.client.read_dataset(dataset_name=self.dataset_name)
+        """Forces creation/recreation of the dataset and populates it with your 50+ examples."""
+        # Delete existing dataset if you want to force a clean slate
+        try:
+            if self.client.has_dataset(dataset_name=self.dataset_name):
+                print(f"Clearing old dataset '{self.dataset_name}' to ensure clean upload...")
+                dataset_to_delete = self.client.read_dataset(dataset_name=self.dataset_name)
+                self.client.delete_dataset(dataset_id=dataset_to_delete.id)
+        except Exception as e:
+            print(f"Note on dataset cleanup: {e}")
 
         print(f"Creating evaluation dataset '{self.dataset_name}' in LangSmith...")
         dataset = self.client.create_dataset(
             dataset_name=self.dataset_name,
-            description="Benchmark dataset evaluating Recall@K, Faithfulness, and Latency across retrieval strategies."
+            description="Full benchmark dataset evaluating 50+ examples."
         )
 
-        examples = [
-            (
-                {"question": "What is the name of the new simple network architecture proposed in the paper?"},
-                {"expected_keywords": ["transformer", "attention"], "ground_truth": "The Transformer, based solely on attention mechanisms."}
-            ),
-            (
-                {"question": "What BLEU score did the Transformer achieve on the WMT 2014 English-to-German translation task?"},
-                {"expected_keywords": ["28.4", "bleu"], "ground_truth": "Achieved 28.4 BLEU on WMT 2014 English-to-German."}
-            ),
-            (
-                {"question": "What is the computational complexity per layer for self-attention compared to recurrent layers?"},
-                {"expected_keywords": ["o(n^2", "self-attention"], "ground_truth": "Self-attention has O(n^2 * d) complexity per layer."}
-            )
-        ]
+        if not self.eval_dataset or len(self.eval_dataset) == 0:
+            raise ValueError("self.eval_dataset is empty! Make sure you define your 50+ examples in __init__.")
 
-        for inputs, outputs in examples:
+        for item in self.eval_dataset:
+            if isinstance(item, tuple):
+                inp, out = item
+            else:
+                inp = {"question": item["question"]}
+                out = {"expected_keywords": item["expected_keywords"], "ground_truth": item["ground_truth"]}
+
             self.client.create_example(
-                inputs=inputs,
-                outputs=outputs,
+                inputs=inp,
+                outputs=out,
                 dataset_id=dataset.id
             )
 
-        print(f"Dataset created with {len(examples)} examples.")
+        print(f"Successfully uploaded {len(self.eval_dataset)} examples to LangSmith dataset.")
         return dataset
 
     def run_evaluation(self):
-        """Runs ablation evaluation and logs custom metrics directly to LangSmith."""
+        """Runs ablation evaluation across Vector, BM25, and Hybrid RRF using the cloud dataset."""
+        # 1. Ensure dataset is fully created and populated with your 50+ items first
         self.setup_dataset()
 
         # Initialize retrievers for ablation comparison
@@ -73,20 +80,19 @@ class LangSmithRAGEvaluator:
         hybrid_retriever = self.rag.retriever
 
         retrievers = {
-            "Vector-Search": vector_retriever,
-            "BM25-Keyword": bm25_retriever,
-            "Hybrid-RRF": hybrid_retriever
+            "Vector Search": vector_retriever,
+            "BM25 Keyword": bm25_retriever,
+            "Hybrid RRF": hybrid_retriever
         }
 
+        # Run evaluation experiment for each retriever strategy using the dataset name string
         for strategy_name, retriever in retrievers.items():
             print(f"\n🚀 Running LangSmith Experiment for strategy: [{strategy_name}]...")
 
-            # 1. Target function executed for each test case
             def target_predict(inputs: dict) -> dict:
                 question = inputs["question"]
                 start_time = time.time()
                 
-                # Fetch retrieved documents
                 if hasattr(retriever, "get_relevant_documents"):
                     docs = retriever.get_relevant_documents(question)[:4]
                 else:
@@ -95,7 +101,6 @@ class LangSmithRAGEvaluator:
                 retrieval_latency = (time.time() - start_time) * 1000
                 context_str = "\n".join([d.page_content for d in docs])
                 
-                # Generate answer via RAG chain
                 gen_start = time.time()
                 answer = self.rag.ask(question)
                 gen_latency = (time.time() - gen_start) * 1000
@@ -107,55 +112,45 @@ class LangSmithRAGEvaluator:
                     "latency_ms": total_latency
                 }
 
-            # 2. Custom Python Evaluator for Recall@K
             def eval_recall_at_k(run, example) -> dict:
                 expected_kw = example.outputs.get("expected_keywords", [])
                 context = run.outputs.get("context", "").lower()
-                
                 if not expected_kw:
                     return {"key": "recall_at_4", "score": 0.0}
-                
                 found = sum(1 for kw in expected_kw if kw.lower() in context)
-                score = found / len(expected_kw)
-                return {"key": "recall_at_4", "score": float(score)}
+                return {"key": "recall_at_4", "score": float(found / len(expected_kw))}
 
-            # 3. Custom Python Evaluator for Faithfulness (LLM-as-a-judge)
             def eval_faithfulness(run, example) -> dict:
                 question = example.inputs.get("question", "")
                 context = run.outputs.get("context", "")
                 answer = run.outputs.get("output", "")
-                
-                judge_prompt = f"""You are an objective evaluation judge. Determine if the Answer is strictly supported by the Context.
+                prompt = f"""You are an objective evaluation judge. Determine if the Answer is strictly supported by the Context.
 Question: {question}
 Context: {context}
 Answer: {answer}
-Is the answer fully supported by the context without introducing outside information? Reply with ONLY 'YES' or 'NO'."""
-                
+Is the answer fully supported by the context without introducing outside information or hallucinations?
+Reply with ONLY 'YES' or 'NO'."""
                 try:
-                    judge_res = self.rag.llm.invoke(judge_prompt).content.strip().upper()
-                    score = 1.0 if "YES" in judge_res else 0.0
+                    response = self.rag.llm.invoke(prompt).content.strip().upper()
+                    score = 1.0 if "YES" in response else 0.0
                 except Exception:
                     score = 0.5
-                    
                 return {"key": "faithfulness", "score": float(score)}
 
-            # 4. Custom Python Evaluator for Latency
             def eval_latency(run, example) -> dict:
-                latency = run.outputs.get("latency_ms", 0.0)
-                return {"key": "latency_ms", "score": float(latency)}
+                return {"key": "latency_ms", "score": float(run.outputs.get("latency_ms", 0.0))}
 
-            # Trigger evaluation experiment upload to LangSmith
+            # Pass the dataset name string. This fixes the attribute error because 
+            # LangSmith fetches valid example objects containing .dataset_id natively.
             evaluate(
                 target_predict,
                 data=self.dataset_name,
                 evaluators=[eval_recall_at_k, eval_faithfulness, eval_latency],
-                experiment_prefix=f"ablation-{strategy_name.lower()}",
+                experiment_prefix=f"ablation-{strategy_name.lower().replace(' ', '-')}",
                 metadata={"project_name": LANGCHAIN_PROJECT, "retriever_strategy": strategy_name}
             )
 
-        print("\n✅ All ablation experiments completed and logged to LangSmith with custom metrics!")
-        print("🔗 View your metrics breakdown table at: https://smith.langchain.com")
-
+        print("\n✅ All ablation experiments completed and logged to LangSmith!")
 
 if __name__ == "__main__":
     evaluator = LangSmithRAGEvaluator()

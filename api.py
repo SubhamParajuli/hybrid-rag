@@ -54,7 +54,7 @@ class QueryResponse(BaseModel):
 
 
 @app.post("/ask", response_model=QueryResponse)
-async def ask_question(request_data: QueryRequest, req: Request):
+def ask_question(request_data: QueryRequest, req: Request):
     """Answers user queries while retaining session history."""
     try:
         rag_chain = req.app.state.rag_chain

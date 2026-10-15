@@ -1,0 +1,13 @@
+langchain>=0.3.0
+langchain-core
+langchain-community
+langchain-huggingface
+langchain-ollama
+chromadb
+rank_bm25
+python-dotenv
+pydantic
+sentence-transformers
+pypdf
+docx2txt
+unstructured

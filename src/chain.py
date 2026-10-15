@@ -4,6 +4,7 @@ from langchain_ollama import ChatOllama
 
 from src.config import OLLAMA_MODEL
 from src.retriever import HybridRetriever
+from typing import List,Tuple
 
 def format_docs(docs):
     """Turns list of Document objects into a single string with source tags."""

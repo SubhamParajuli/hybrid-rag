@@ -7,12 +7,13 @@ st.set_page_config(
     layout="centered"
 )
 
-st.title("🤖 Open-Source Hybrid RAG Assistant")
+st.title("🤖 Hybrid RAG Assistant")
 st.markdown("Powered by **LangChain**, **Chroma**, **BM25**, **Ollama**, and **FastAPI**.")
 
-API_URL = "http://localhost:8000"
+# Explicit local loopback address to avoid WinError network resolution quirks
+API_URL = "http://127.0.0.1:8000"
 
-# --- Sidebar: Document Uploads & Management ---
+# --- Sidebar: Document Management & Uploads ---
 with st.sidebar:
     st.header("📂 Document Management")
     st.markdown("Upload files directly to the API server.")
@@ -27,6 +28,7 @@ with st.sidebar:
         if st.button("Upload & Ingest", type="primary"):
             with st.spinner("Uploading files and indexing vector store..."):
                 try:
+                    # Construct multipart payload for multiple files
                     files_payload = [
                         ("files", (file.name, file.getvalue(), file.type)) 
                         for file in uploaded_files
@@ -37,7 +39,7 @@ with st.sidebar:
                     )
                     
                     if response.status_code == 200:
-                        st.success("Files successfully indexed!")
+                        st.success("Files successfully uploaded and indexed!")
                     else:
                         err = response.json().get("detail", "Unknown error")
                         st.error(f"Ingestion failed: {err}")
@@ -52,7 +54,6 @@ with st.sidebar:
 # --- Main Chat UI with Persistence ---
 st.divider()
 
-# Initialize session state message history
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -63,7 +64,8 @@ for message in st.session_state.messages:
 
 # Chat Input Bar
 if prompt := st.chat_input("Ask a question about your documents..."):
-    # 1. Display user query
+    # 1. Display user query immediately
+    st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
@@ -73,7 +75,7 @@ if prompt := st.chat_input("Ask a question about your documents..."):
             try:
                 payload = {
                     "question": prompt,
-                    "chat_history": st.session_state.messages  # Persistence passed here!
+                    "chat_history": st.session_state.messages[:-1] # Send prior history excluding current prompt
                 }
                 
                 response = requests.post(f"{API_URL}/ask", json=payload)
@@ -82,8 +84,7 @@ if prompt := st.chat_input("Ask a question about your documents..."):
                     answer = response.json().get("answer", "No answer returned.")
                     st.markdown(answer)
                     
-                    # Update session state history
-                    st.session_state.messages.append({"role": "user", "content": prompt})
+                    # Update session state with assistant response
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                 else:
                     err = response.json().get("detail", "Unknown error")

@@ -15,7 +15,7 @@ class VectorStoreManager:
        print(f"Loading embedding model: {EMBEDDING_MODEL_NAME}...")
        self.embeddings=HuggingFaceEmbeddings(
            model_name=EMBEDDING_MODEL_NAME,
-           model_kwargs={"device":"gpu"},
+           model_kwargs={"device":"cpu"},
            encode_kwargs={"normalize_embeddings":True}
        )
        self._vector_store:Optional[Chroma]=None
